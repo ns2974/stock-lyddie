@@ -1,0 +1,365 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('stock-server:server');
+var webSocketServer = require('websocket').server;
+var http = require('http');
+
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+// app.set('port', port);
+console.log("Listen: 3000");
+app.set('port', 3000);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+var fs = require('fs');
+var path = require('path');
+var basePath = path.join(__dirname, '../');
+// var Stock = require(basePath + '/services/stock');
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+
+/**
+ * Log time + msg.
+ */
+
+function logMsg(message) {
+  var d = new Date();
+  var time = '[' + d.getHours() + ':' + d.getMinutes() + ':' + d.getSeconds()+ '] ';
+
+  console.log(time + message);
+}
+
+/**
+ * Use websocket
+ */
+
+var wsServer = new webSocketServer({
+  httpServer: server,
+  autoAcceptConnections: false
+});
+
+function originIsAllowed(origin) {
+  // put logic here to detect whether the specified origin is allowed.
+  return origin == 'http://localhost:8080';
+}
+
+/**
+ * read stock data file
+ */
+var stocksByFile = [];
+var noOfStocks;
+var nowStocks = {
+  selling: [],
+  purchase: [],
+  tradedPrice: null,
+  tradedIdx: null
+};
+var stockInterval;
+
+
+fs.readFile(basePath + '/public/files/data.txt', 'utf8', (err, data) => {
+  if (err) {
+      console.log(err)
+      return;
+  }
+
+  let lines = data.split("\n");
+  noOfStocks = lines.length;
+  let stock;
+  for (let i = 0; i < noOfStocks; i++) {
+    stock = lines[i].split("\t");
+    stocksByFile.push({
+      none: false,
+      index: i,
+      type: stock[0],
+      price: Number(stock[1]),
+      quantity: Number(stock[2])
+    });
+  }
+});
+
+function cloneObj(obj) {
+  let output = {};
+  for (let i in obj) {
+    output[i] = obj[i];
+  }
+  return output;
+}
+
+var sellings = [];    // object
+var purchases = [];   // object
+var sellingPrice = [];    // number - 매도가 오름차순
+var purchasePrice = [];   // number - 매수가 내림차순
+var tradedPrice = -1;
+var tradedIdx = -1;
+
+function initStockInfo() {
+  nowStocks = {
+    selling: [],
+    purchase: [],
+    tradedPrice: null,
+    tradedIdx: null
+  };
+  sellings = [];    // object
+  purchases = [];   // object
+  sellingPrice = [];    // number - 매도가 오름차순
+  purchasePrice = [];   // number - 매수가 내림차순
+  tradedPrice = -1;
+  tradedIdx = -1;
+}
+
+function askPrice(/* idx of stocksByFile = */ i) {
+  // console.log('READ [' + i + ']');
+  let cnt = 0;
+  let stock = cloneObj(stocksByFile[i]);
+  stock.index = Math.floor(Math.random() * 100000);
+
+  if (stock.type == 'S') {  // 매도
+    cnt = 0;    // check infinite loop
+    // 가장 큰 매수가가 매도호가 이상이면 체결
+    while (stock.quantity > 0 && stock.price <= purchasePrice[0]) {
+      tradedIdx = stock.index;
+      tradedPrice = stock.price;
+      let deleteMaxPurchasePrice = false;
+      // 매도호가에 맞는 매수가를 찾아 체결
+      if (stock.quantity < purchases[0].quantity) {
+        tradedIdx = purchases[0].index;
+        purchases[0].quantity -= stock.quantity
+        stock.quantity = 0;
+        deleteMaxPurchasePrice = false;
+        break;
+      } else {
+        stock.quantity -= purchases[0].quantity;
+        purchases[0].quantity = 0;
+        deleteMaxPurchasePrice = true;
+      }
+      // 완전체결된 매수가는 삭제
+      if (deleteMaxPurchasePrice) {
+        purchases.shift();
+        purchasePrice.shift();
+      }
+      if (++cnt > 5000) {
+        console.log('Infinite loop!');
+        break;
+      }
+    }
+
+    // 체결 후, 매도가가 남아있으면 오름차순에 따라 추가
+    if (0 < stock.quantity) {
+      let idx = sellingPrice.indexOf(stock.price);
+      if (idx < 0) {
+        let n = sellingPrice.length;
+        for (let j = 0; j < n; j++) {
+          if (stock.price < sellingPrice[j]) {
+            sellingPrice.splice(j, 0, stock.price);
+            break;
+          }
+        }
+        if (n == sellingPrice.length) {
+          sellingPrice.push(stock.price);
+        }
+        idx = sellingPrice.indexOf(stock.price);
+        sellings.splice(idx, 0, cloneObj(stock));
+      } else {
+        sellings[idx].quantity += stock.quantity;
+      }
+    }
+  }
+  if (stock.type == 'B') {    // 매수
+    cnt = 0;    // check infinite loop
+    // 가장 작은 매도가가 매수호가보다 이하이면 체결
+    while (stock.quantity > 0 && sellingPrice[0] <= stock.price) {
+      tradedIdx = sellings[0].index;
+      tradedPrice = sellingPrice[0];
+      let deleteMinSellingPrice = false;
+      // 매수호가에 맞는 매도가를 찾아 체결      
+      if (stock.quantity < sellings[0].quantity) {
+        sellings[0].quantity -= stock.quantity
+        stock.quantity = 0;
+        deleteMinSellingPrice = false;
+        break;
+      } else {
+        tradedIdx = stock.index;
+        stock.quantity -= sellings[0].quantity;
+        sellings[0].quantity = 0;
+        deleteMinSellingPrice = true;
+      }
+      // 완전체결된 매도가는 삭제
+      if (deleteMinSellingPrice) {
+        sellings.shift();
+        sellingPrice.shift();
+      }
+      if (++cnt > 5000) {
+        console.log('Infinite loop!');
+        break;
+      }
+    }
+    
+    // 체결 후, 매수가가 남아있으면 내림차순에 따라 추가
+    if (0 < stock.quantity) {
+      let idx = purchasePrice.indexOf(stock.price);
+      if (idx < 0) {
+        let n = purchasePrice.length;
+        for (let j = 0; j < n; j++) {
+          if (purchasePrice[j] < stock.price) {
+            purchasePrice.splice(j, 0, stock.price);
+            break;
+          }
+        }
+        if (n == purchasePrice.length) {
+          purchasePrice.push(stock.price);
+        }
+        idx = purchasePrice.indexOf(stock.price);
+        purchases.splice(idx, 0, cloneObj(stock));
+      } else {
+        purchases[idx].quantity += stock.quantity;
+      }
+    }
+  }
+  if (++cnt > 5000) {
+    return -1;
+  }
+
+  return nowStocks = {
+    selling: sellings,
+    purchase: purchases,
+    tradedPrice: tradedPrice,
+    tradedIdx: tradedIdx
+  }
+}
+
+function restartStockInterval(delayTime) {
+  if (!delayTime) {
+    delayTime = 3000;
+  }
+  var time = 0;
+  setTimeout(() => {
+    stockInterval = setInterval(() => {
+      nowStocks = askPrice(time);
+      if (stocksByFile.length <= ++time) {
+        clearInterval(stockInterval)
+      }
+    }, 1000);
+  }, delayTime);
+}
+
+restartStockInterval();
+
+wsServer.on('request', function(request) {
+  if (!originIsAllowed(request.origin)) {
+    // Make sure we only accept requests from an allowed origin
+    request.reject();
+    logMsg(' Connection from origin ' + request.origin + ' rejected.')
+    return;
+  }
+  var connection = request.accept('echo-protocol', request.origin);
+  logMsg(' Connection accepted.');
+  let tmpAddOneCNT = 0;     // test
+  connection.on('message', function(message) {
+    connection.send(JSON.stringify(nowStocks));
+    if (message.type === 'utf8') {
+      if (message.utf8Data == 'initStock') {
+        tmpAddOneCNT = 0;   // test
+        clearInterval(stockInterval);
+        initStockInfo();
+        restartStockInterval(100);
+      }
+      if (message.utf8Data == 'getStock') {
+        setInterval(() => {
+          connection.send(JSON.stringify(nowStocks));
+        }, 1000);
+      }
+      if (message.utf8Data == 'addOne') {
+        clearInterval(stockInterval);
+        nowStocks = askPrice(tmpAddOneCNT % 59);
+        tmpAddOneCNT++;
+      }
+    }
+  });
+  connection.on('close', function(reasonCode, description) {
+    logMsg('Peer ' + connection.remoteAddress + ' disconnected.');
+  });
+});
+/**
+ * // Use websocket
+ */
+
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
